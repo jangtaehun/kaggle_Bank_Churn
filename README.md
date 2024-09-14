@@ -254,7 +254,7 @@ train_df.groupby('Age_range')['NumOfProducts'].value_counts(normalize=True).unst
 ```
 ![image](https://github.com/user-attachments/assets/9a0dd1a3-09d9-4686-b7a4-325c2649029f)
 
-연령대가 높을 수록 은행에서 이용하는 상품 수가 많다. 전체적으로 보면 전체 연령대에서 1~2개를 이용하는 비율이 높지만 이탈율이 가장 많은 Adult, Elderly에서 1개만 이용하는 비율이 높으며 3~4개를 이용하는 비율 역시 높다. 아래 표는 Adult, Elderly일 때 Student와 Young Adult 간의 이용 상품 수가 3~4개 일 때의 비율을 비교한 것이다. 이렇게 비교를 통해 Adult와 Elderly가 이탈 가능성이 더 높은 것을 확인할 수 있다.
+연령대가 높을 수록 은행에서 이용하는 상품 수가 많다. 전체적으로 보면 전체 연령대에서 1-2개를 이용하는 비율이 높지만 이탈율이 가장 많은 Adult, Elderly에서 1개만 이용하는 비율이 높으며 3-4개를 이용하는 비율 역시 높다. 아래 표는 Adult, Elderly일 때 Student와 Young Adult 간의 이용 상품 수가 3~4개 일 때의 비율을 비교한 것이다. 이렇게 비교를 통해 Adult와 Elderly가 이탈 가능성이 더 높은 것을 확인할 수 있다.
 
 <img width="716" alt="image" src="https://github.com/user-attachments/assets/bc8cc872-2ee9-464d-8a01-63fdbfa456b4">
 
