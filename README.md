@@ -258,6 +258,7 @@ train_df.groupby('Age_range')['NumOfProducts'].value_counts(normalize=True).unst
 
 <img width="716" alt="image" src="https://github.com/user-attachments/assets/bc8cc872-2ee9-464d-8a01-63fdbfa456b4">
 
+
 4. Tenure - 은행 이용 기간
 
 은행 이용 기간 역시 은행 서비스 이용에 있어 큰 영향을 줄 것으로 생각하고 있다. 그 이유는 신용 카드, 대출, 저축 계좌 등을 여러 해 동안 이용했을 수 있기 때문에 오랜 기간 이용할 경우 은행에 큰 실망을 하지 않는 이상 은행을 바꾸지 않기 때문이다.
