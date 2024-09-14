@@ -56,7 +56,7 @@ Bank Churn Dataset은 kaggle에서 2024년을 맞이해 제공한 것으로 고�
 
 제공되는 데이터는 train.csv, test.csv, sample_submission.scv 세 개의 파일로 train.csv를 토대로 test.csv의 고객 이탈 여부를 예측하는 문제이다. 이후 sample_submission.csv에 입력한 후 제출하는 해당 파일을 제출하는 것이다.
 
-### Santander Customer Satisfaction data set을 이용한 EDA
+### Bank Churn Data set을 이용한 EDA 및 Data Cleaning
    #### 1. 공통 코드
 import libraries and files
 ```
@@ -125,7 +125,6 @@ train_df.describe()
 ![image](https://github.com/user-attachments/assets/a21cdec6-6ad2-42ad-b97d-8ad6cc21f0ea)
 
 대략적으로 볼 때 이상치가 보이지는 않다. 다만 CreditScore와 Age가 넓게 분포한 것은 확인할 수 있다. 따라서 범위를 특정해서 구분하는 것도 좋은 방법이라고 생각한다.
-
 ```
 target_cnt = train_df['Exited'].count()
 print(train_df['Exited'].value_counts())
@@ -262,7 +261,6 @@ train_df.groupby('Age_range')['NumOfProducts'].value_counts(normalize=True).unst
 4. Tenure - 은행 이용 기간
 
 은행 이용 기간 역시 은행 서비스 이용에 있어 큰 영향을 줄 것으로 생각하고 있다. 그 이유는 신용 카드, 대출, 저축 계좌 등을 여러 해 동안 이용했을 수 있기 때문에 오랜 기간 이용할 경우 은행에 큰 실망을 하지 않는 이상 은행을 바꾸지 않기 때문이다.
-
 ```
 tenure_exited_counts = numeric_df.groupby('Tenure')['Exited'].value_counts(normalize=True).unstack()
 tenure_exited_counts
@@ -353,6 +351,371 @@ train_df
 결과적으로 아래와 같이 feature가 만들어 졌다.
 ![image](https://github.com/user-attachments/assets/91b92fa3-bb9a-455e-a22e-c082c48e65e2)
 
+### 모델 학습
+XGBoost와 LightGBM은 CatBoost와 다르게 라벨링 작업을 해야한다. 따라서 XGBoost와 LightGBM에 적용할 공통 코드를 먼저 작성하겠다.
+```
+y = train_df['Exited']
+X = train_df.drop(['Exited','Surname'], axis=1)
+test_df = test_df.drop(['Surname'], axis=1)
+```
+먼저 Surname을 drop하겠다. Surname은 train 데이터에 없는 것이 test 데이터에는 포함되어 있을 수 있기 때문에 Lable Encoding을 할 때 LabelEncoder.classes_ 을 이용하는 방법도 있지만 처음 보는 데이터는 잘못 학습할 수 있기 때문에 제거하기로 했다. 
+```
+X.drop(['Surename_Geography_Gender'], axis=1, inplace=True)
+test_df.drop(['Surename_Geography_Gender'], axis=1, inplace=True)
+```
+위 코드 역시  Surname이 포함된 feature를 제거하는 것으로 이유는 위와 같다.
+```
+numeric_X = X.select_dtypes(include=['float', 'int']).columns
+category_X = X.select_dtypes(include=['object']).columns
+```
+스케일링과 인코딩을 위해 numeric feature와 아닌 feature를 구분했다. 이후 밑에 있는 코드와 같이 스케일링과 인코딩을 진행했다.
+```
+# scaling
+from sklearn.preprocessing import StandardScaler
 
+scaler = StandardScaler()
+X[numeric_X] = scaler.fit_transform(X[numeric_X])
+test_df[numeric_X] = scaler.transform(test_df[numeric_X])
+
+X = pd.DataFrame(X, columns=columns)
+test_df = pd.DataFrame(test_df, columns=columns)
+
+# label encoding
+from sklearn.preprocessing import LabelEncoder
+
+le = LabelEncoder()
+for i in category_X:
+    encoder = LabelEncoder()
+    encoder.fit(X[i])
+    
+    X[i] = encoder.transform(X[i])
+    test_df[i] = encoder.transform(test_df[i])
+```
+   #### 1. XGBoost
+```
+num_folds=5
+n_est=3500
+```
+```
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=RANDOM_STATE, stratify=y)
+```
+```
+from hyperopt import hp, fmin, tpe, Trials
+from sklearn.model_selection import KFold
+from sklearn.metrics import roc_auc_score
+from xgboost import XGBClassifier, plot_importance
+
+xgb_search_space = {'max_depth': hp.quniform('max_depth', 2, 15, 1), 
+                    'min_child_weight': hp.quniform('min_child_weight', 1, 6, 1),
+                    'colsample_bytree': hp.uniform('colsample_bytree', 0.5, 0.95),
+                    'learning_rate': hp.uniform('learning_rate', 0.01, 0.2)}
+
+def objective_func(search_space):
+    xgb_clf = XGBClassifier(n_estimators=100,
+                            max_depth=int(search_space['max_depth']),
+                            min_child_weight=int(search_space['min_child_weight']),
+                            colsample_bytree=search_space['colsample_bytree'],
+                            learning_rate=search_space['learning_rate'],
+                            early_stopping_rounds=30,
+                            eval_metric='logloss',
+                           random_state=RANDOM_STATE)
+    
+    roc_auc_list= []
+    kf = KFold(n_splits=5)
+    
+    for tr_index, val_index in kf.split(X_train):
+        X_tr, y_tr = X_train.iloc[tr_index], y_train.iloc[tr_index]
+        X_val, y_val = X_train.iloc[val_index], y_train.iloc[val_index]
+        
+        xgb_clf.fit(X_tr, y_tr, eval_set=[(X_tr, y_tr), (X_val, y_val)], verbose=False)
+        score = roc_auc_score(y_val, xgb_clf.predict_proba(X_val)[:, 1])
+        roc_auc_list.append(score)
+    return -1 * np.mean(roc_auc_list)
+
+trials = Trials()
+best = fmin(fn=objective_func,
+            space=xgb_search_space,
+            algo=tpe.suggest,
+            max_evals=50, # 최대 반복 횟수를 지정합니다.
+            trials=trials,
+            rstate=np.random.default_rng()
+           )
+print('best:', best)
+
+xgb_clf = XGBClassifier(n_estimators=500, learning_rate=round(best['learning_rate'], 5),
+                        max_depth=int(best['max_depth']), min_child_weight=int(best['min_child_weight']), eval_metric="logloss",
+                        colsample_bytree=round(best['colsample_bytree'], 5), random_state=RANDOM_STATE, verbose=False)
+
+xgb_clf.fit(X_tr, y_tr, eval_set=[(X_tr, y_tr), (X_val, y_val)])
+xgb_roc_score = roc_auc_score(y_test, xgb_clf.predict_proba(X_test)[:,1])
+print('ROC AUC: {0:.4f}'.format(xgb_roc_score))
+```
+```
+pred = xgb_clf.predict(X_train) 
+proba = xgb_clf.predict_proba(X_train)[:, 1]
+
+best_rf_pred = xgb_clf.predict(X_test) 
+best_rf_proba = xgb_clf.predict_proba(X_test)[:, 1]
+
+get_clf_eval(y_train, pred, proba)
+get_clf_eval(y_test , best_rf_pred, best_rf_proba)
+```
+optuna와 K-Fold를 이용해 베스트 파라미터를 구한 다음 결과 값을 확인해 보면 다음과 같다.
+```
+[[87041  4002]
+ [10049 14394]]
+정확도: 0.8783, 정밀도: 0.7825, 재현율: 0.5889,    F1: 0.6720, AUC:0.9102
+오차 행렬
+[[36944  2074]
+ [ 4716  5760]]
+정확도: 0.8628, 정밀도: 0.7353, 재현율: 0.5498,    F1: 0.6292, AUC:0.8869
+```
+평가 지표인 AUC는 train 데이터에 대한 AUC 값이 너무 높다면(예: 0.99 이상), 모델이 과적합될 가능성이 크기 때문에 test 데이터에 대한 AUC 값이 중요다. 즉, test 데이터에서 값이 높을수록, 모델이 일반화된 성능을 가지고 있다고 볼 수 있다. 결과를 보면 평가 기준인 AUC가 좋게 나왔으며 train과 test 세트에서 큰 차이가 나지 않어 과적합은 아니다. 따라서 좋은 모델이라고 볼 수 있다. 하지만 재현율이 둘 다 낮은 편이므로, 실제 이탈(Exited = 1)을 놓치는 경우가 많을 수 있다.
+```
+test_preds = np.empty((num_folds, len(test_df)))
+auc_vals = []
+
+folds = StratifiedKFold(n_splits=num_folds, random_state=RANDOM_STATE, shuffle=True)
+
+for n_fold, (train_idx, valid_idx) in enumerate(folds.split(X, y)):
+    
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_val, y_val = X.iloc[valid_idx], y.iloc[valid_idx]
+    
+    xgb_clf.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+    
+    y_pred_val = xgb_clf.predict_proba(X_val)[:, 1]
+    auc_val = roc_auc_score(y_val, y_pred_val)
+    print(f"AUC for fold {n_fold}: {auc_val}")
+    auc_vals.append(auc_val)
+    
+    y_pred_test = xgb_clf.predict_proba(test_df)[:, 1]
+    test_preds[n_fold, :] = y_pred_test
+    print("----------------")
+
+y_pred = test_preds.mean(axis=0)
+
+print(f"최종 예측값 (y_pred): {y_pred}")
+```
+다음으로 k-fold를 이용해 데이터를 5개로 나눈 다음 위에서 학습한 베스트 파라미터를 통해 각 케이스마다 test 데이터를 예측한 후 test_preds에 저장했다. 예측한 확률들을 평균을 낸 다음 아래와 같이 제출 파일의 Exited에 입력한 후 제출했다.
+```
+submission_df['Exited'] = y_pred
+submission_df.head()
+submission_df.to_csv("submission.csv",index=False)
+```
+kaggle에 제출하면 다음과 같이 결과가 나온다.
+![image](https://github.com/user-attachments/assets/a7c4b50f-6dbb-4978-9b71-de9f7545cdc3)
+
+   #### 2. LightGBM
+```
+num_folds=5
+n_est=3500
+```
+```
+import optuna
+
+def objective(trial):
+    param = {
+        'objective': 'binary',
+        'metric': 'binary_logloss',
+        'boosting_type': 'gbdt',
+        'num_leaves': trial.suggest_int('num_leaves', 20, 60),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        'min_child_weight': trial.suggest_float('min_child_weight', 0.1, 10.0),
+        'max_depth': trial.suggest_int('max_depth', 3, 15),
+        'subsample': trial.suggest_float('subsample', 0.4, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.1, log=True),
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1, 50),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 10.0),
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0),
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000)
+    }
+
+    lgb_model = LGBMClassifier(**param, random_state=RANDOM_STATE, verbose=-1)
+    lgb_model.fit(X_train, y_train, feature_name=['f' + str(i) for i in range(X_train.shape[1])])
+    y_val_pred = lgb_model.predict(X_test)
+    f1 = f1_score(y_test, y_val_pred, pos_label=1) 
+    return f1
+
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=200)
+
+best_params = study.best_params
+print("Best params: ", best_params)
+
+best_lgb_model = LGBMClassifier(**best_params, random_state=RANDOM_STATE)
+best_lgb_model.fit(X_train, y_train, feature_name=['f' + str(i) for i in range(X_train.shape[1])])
+```
+```
+pred = best_lgb_model.predict(X_train) 
+proba = best_lgb_model.predict_proba(X_train)[:, 1]
+
+best_rf_pred = best_lgb_model.predict(X_test) 
+best_rf_proba = best_lgb_model.predict_proba(X_test)[:, 1]
+
+get_clf_eval(y_train, pred, proba)
+get_clf_eval(y_test , best_rf_pred, best_rf_proba)
+```
+XGBoost와 같이 optuna와 K-Fold를 이용해 베스트 파라미터를 구한 다음 결과 값을 확인해 보면 다음과 같다.
+```
+오차 행렬
+[[93819 10230]
+ [ 5401 22534]]
+정확도: 0.8816, 정밀도: 0.6878, 재현율: 0.8067,    F1: 0.7425, AUC:0.9352
+오차 행렬
+[[34992  4026]
+ [ 2258  8218]]
+정확도: 0.8730, 정밀도: 0.6712, 재현율: 0.7845,    F1: 0.7234, AUC:0.9259
+```
+과적합되지 않고 좋은 일반화 성능을 보이고 있다. XGBoost보다 재현율이 높아졌지만 정밀도가 낮아졌다.
+```
+test_preds = np.empty((num_folds, len(test_df)))
+auc_vals = []
+
+folds = StratifiedKFold(n_splits=num_folds, random_state=RANDOM_STATE, shuffle=True)
+
+for n_fold, (train_idx, valid_idx) in enumerate(folds.split(X, y)):
+    
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_val, y_val = X.iloc[valid_idx], y.iloc[valid_idx]
+    
+    # 최적화된 파라미터로 LightGBM 모델 학습
+    best_lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+    
+    # 검증 데이터에 대한 예측
+    y_pred_val = best_lgb_model.predict_proba(X_val)[:, 1]
+    auc_val = roc_auc_score(y_val, y_pred_val)
+    print(f"AUC for fold {n_fold}: {auc_val}")
+    auc_vals.append(auc_val)
+    
+    # 테스트 데이터에 대한 예측을 저장
+    y_pred_test = best_lgb_model.predict_proba(test_df)[:, 1]
+    test_preds[n_fold, :] = y_pred_test
+    print("----------------")
+
+# 모든 fold에서의 테스트 예측값 평균 계산
+y_pred = test_preds.mean(axis=0)
+
+print(f"최종 예측값 (y_pred): {y_pred}")
+```
+```
+submission_df['Exited'] = y_pred
+submission_df.head()
+submission_df.to_csv("submission.csv",index=False)
+```
+![image](https://github.com/user-attachments/assets/adad2008-68ca-4bc3-96a5-4f88cc0a1668)
+
+결과는 XGBoost보다 살짝 높은 점수를 얻을 수 있다.
+
+   #### 3. CatBoost
+```
+y = train_df['Exited']
+X = train_df.drop(['Exited'], axis=1)
+```
+CatBoost는 XGBoost와 LightGBM과 같이 인코딩을 따로 안 해줘도 된다. 따라서 위와 같이 target만 X, y로 분리했다.
+```
+numeric_X = X.select_dtypes(include=['float', 'int']).columns
+```
+```
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+X[numeric_X] = scaler.fit_transform(X[numeric_X])
+test_df[numeric_X] = scaler.transform(test_df[numeric_X])
+
+X = pd.DataFrame(X, columns=columns)
+test_df = pd.DataFrame(test_df, columns=columns)
+```
+스케일링을 위해 numeric feature만 따로 저장한 후 스케일링을 진행했다.
+```
+cat_features = np.where(X.dtypes != np.float64)[0]
+```
+CatBoost에서 float형이 아닌 컬럼을 알려줘야 인코딩을 따로 진행하지 않아도 처리가 가능하다. 따라서 따로 컬럼의 index를 추출했다. CatBoost가 좋은 점은 test 데이터에만 존재하는 데이터 즉, 새로운 카테고리 값을 처리할 수 있는 고유한 방식이 있다는 것이다.
+
+```
+num_folds=5
+n_est=3500
+```
+```
+folds = StratifiedKFold(n_splits=num_folds, random_state=RANDOM_STATE, shuffle=True)
+test_preds = np.empty((num_folds, len(test_df)))
+auc_vals=[]
+
+for n_fold, (train_idx, valid_idx) in enumerate(folds.split(X, y)):
+    
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_val, y_val = X.iloc[valid_idx], y.iloc[valid_idx]
+    
+    train_pool = Pool(X_train, y_train, cat_features=cat_features)
+    val_pool = Pool(X_val, y_val, cat_features=cat_features)
+    
+    clf = CatBoostClassifier(eval_metric='AUC', learning_rate=0.03, iterations=n_est)
+    clf.fit(train_pool, eval_set=val_pool, verbose=300)
+    
+    y_pred_val = clf.predict_proba(X_val[columns])[:,1]
+    auc_val = roc_auc_score(y_val, y_pred_val)
+    print("AUC for fold ", n_fold, ": ", auc_val)
+    auc_vals.append(auc_val)
+    
+    y_pred_test = clf.predict_proba(test_df[columns])[:,1]
+    test_preds[n_fold, :] = y_pred_test
+    print("----------------")
+```
+k-fold를 이용해 데이터를 5개로 나눈 다음 각 케이스마다 test 데이터를 예측한 후 test_preds에 저장했다. 쉽게 표현하면 다음과 같다. 또한, CatBoost는 자동으로 파라미터를 튜닝해주기 때문에 optuna와 F-Fold를 이용해 튜닝을 하지 않았다.
+
+*  Fold 1: a로 검증, b + c + d + e로 훈련 → test_df 예측
+*  Fold 2: b로 검증, a + c + d + e로 훈련 → test_df 예측
+*  Fold 3: c로 검증, a + b + d + e로 훈련 → test_df 예측
+*  Fold 4: d로 검증, a + b + c + e로 훈련 → test_df 예측
+*  Fold 5: e로 검증, a + b + c + d로 훈련 → test_df 예측
+```
+submission_df['Exited'] = y_pred
+submission_df.head()
+submission_df.to_csv("submission.csv",index=False)
+```
+이후 위에서 했던 방법과 같이 평균을 낸 y_pred를 제출 파일에 입력한 후 제출했다. 결과는 아래와 같다. 결과적으로 CatBosot가 가장 높은 점수를 얻을 수 있었다.
+![image](https://github.com/user-attachments/assets/a4d74ce1-e6a5-4fc7-b409-b4732d90e911)
+
+   #### 4. Data Leakage
+
+이번 대회에서는 Data Leakage가 있었다. 물론 필자는 Data Leakage가 일어나지 않았지만 공유된 코드를 보면 높은 점수를 얻은 사람들의 대부분은 Data Leakage가 있었다.
+
+kaggle에서 제공한 파일은 train, test, submission 이렇게 세 개의 파일이다. 하지만 공유된 코드를 보면 Original Data가 등장한다.
+
+![image](https://github.com/user-attachments/assets/78ad183d-3e2d-4d1c-b364-78e23fd07886)
+
+Original Data를 학습 데이터에 포함해서 아래와 같이 학습을 했다. 
+```
+df_train = pd.concat([df_train, original_data], axis=0)
+```
+![image](https://github.com/user-attachments/assets/bb5c87a8-724e-4048-965c-06656d563eff)
+
+하지만 위의 사진과 같이 점수는 필자와 비슷하게 나왔다.
+
+---
+
+### 결론
+이번 Kaggle 분류 대회를 통해 고객 이탈(Churn)을 예측하는 과정을 다루면서 다양한 모델과 기법을 실험했습니다. 데이터를 처리하는 과정에서 EDA(탐색적 데이터 분석)를 통해 주요한 패턴과 특성을 발견하였고, 이를 바탕으로 Feature Engineering을 통해 예측 성능을 높이기 위한 새로운 변수를 추가했습니다. 또한, LightGBM, XGBoost, CatBoost와 같은 다양한 부스팅 모델을 사용해 성능을 평가했으며, 각 모델의 장단점과 결과를 비교하는 과정을 거쳤습니다.
+
+* Feature Engineering의 중요성
+고객 이탈 예측에서 중요한 변수로는 나이, 신용 점수, 은행 서비스 이용 기간, 사용 중인 금융 상품의 수 등이 있었습니다. 이러한 변수들은 고객의 행동 패턴을 반영할 수 있으며, 이탈 가능성을 잘 예측할 수 있는 변수들로 드러났습니다. 특히, 나이를 연령대 그룹으로 나누고, 고객이 이용하는 상품 수와 이용 기간을 조합하여 만든 변수는 모델의 성능을 향상시키는 데 중요한 역할을 했습니다.
+* 모델 비교 및 성능 평가
+세 가지 대표적인 부스팅 모델(XGBoost, LightGBM, CatBoost)을 사용하여 모델을 학습하고 검증한 결과, CatBoost 모델이 가장 높은 AUC(Area Under the ROC Curve)를 기록했습니다. CatBoost는 범주형 변수를 자동으로 처리하고, 테스트 데이터에서 새로운 범주형 변수를 인식할 수 있어, 이 과정에서 특별한 인코딩 작업을 생략할 수 있는 강점이 있었습니다. 이로 인해 더 높은 일반화 성능을 발휘할 수 있었습니다. LightGBM과 XGBoost도 좋은 성능을 보였으나, 데이터셋의 특성상 CatBoost가 더 적합한 모델임을 확인할 수 있었습니다.
+* 교차 검증을 통한 모델의 일반화
+교차 검증(K-Fold)을 통해 모델의 성능을 평가한 결과, 과적합 없이 안정적인 성능을 보여주는 것이 중요함을 다시 한 번 확인했습니다. 각 Fold에서 비슷한 AUC 점수를 기록한 모델은 일반화된 성능을 가지고 있다는 것을 의미하며, 이것이 Kaggle 대회에서 중요한 요소 중 하나임을 느꼈습니다. 다양한 Fold에서 훈련과 검증을 거쳐 최종 예측값을 평균화하는 방식은, 개별 Fold에서 발생할 수 있는 불균형한 데이터를 보완해 줍니다.
+* Data Leakage의 중요성
+이번 대회에서는 Data Leakage가 일부 참가자들 사이에서 발생한 점이 눈에 띄었습니다. 본래 Kaggle 대회에서는 제공된 학습 데이터와 테스트 데이터만을 사용해야 하지만, 일부 참가자들은 공유된 'Original Data'를 학습에 포함하여 점수를 높였습니다. Data Leakage는 모델의 성능을 부정확하게 높일 수 있으며, 실제 환경에서는 신뢰할 수 없는 결과를 초래할 수 있기 때문에 주의해야 할 요소입니다. 필자는 이러한 점을 인지하고, 데이터 누출이 없는 방식으로 모델을 구축하여, 공정하게 성능을 평가할 수 있었습니다.
+
+#### 한계점
+* 불균형 데이터
+고객 이탈 예측에서 타겟 클래스(Exited = 1)와 비이탈 클래스(Exited = 0)의 불균형은 주요한 문제였습니다. 이로 인해 모델이 이탈하지 않는 고객을 과대 평가할 가능성이 있었고, 이는 F1 점수에서 낮은 재현율로 나타났습니다. 이러한 문제를 해결하기 위해 언더샘플링, 오버샘플링, SMOTE와 같은 기법을 사용해 데이터 불균형을 해결할 수도 있었으나, 이번 대회에서는 이러한 기법을 활용하지 않았습니다. 향후에는 더 복잡한 기법을 적용하여 불균형 문제를 해결할 수 있을 것입니다.
+* 데이터 이해 부족
+제공된 데이터는 실제 금융 데이터가 아니었기 때문에 실제 은행에서 고객 이탈을 예측하는 문제와는 다를 수 있습니다. 이로 인해, 일부 변수의 패턴이 실제 금융 데이터에서는 다르게 나타날 수 있습니다. 또한, 이번 프로젝트에서는 피처에 대한 더 깊은 도메인 지식을 바탕으로 한 변형이 제한적이었으므로, 실제 적용에서는 추가적인 변형 및 도메인 지식이 필요할 것입니다.
+
+#### 마무리
+이번 프로젝트를 통해 분류 문제에서 데이터 전처리, Feature Engineering, 모델 학습, 그리고 성능 평가에 대한 종합적인 경험을 쌓을 수 있었습니다. 특히, LightGBM, XGBoost, CatBoost와 같은 부스팅 모델의 강력함을 확인할 수 있었고, 데이터 처리와 모델 선택이 성능에 미치는 영향을 경험할 수 있었습니다. 분류 문제는 데이터의 특성과 모델의 선택이 중요한 역할을 하며, 이를 잘 이해하고 활용하는 것이 좋은 성능을 이끌어 내는 핵심임을 깨달았습니다.
+
+다음 게시물부터는 회귀 문제를 다루며 새로운 인사이트를 얻는 과정을 진행하려고 합니다. 이번 분류 문제를 통해 얻은 경험을 바탕으로 더 발전된 회귀 분석을 다룰 예정이며, 이와 같은 과정을 반복하며 데이터 분석 및 머신러닝 모델링 역량을 지속적으로 향상시킬 것입니다.
 
 
