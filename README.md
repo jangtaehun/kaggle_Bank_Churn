@@ -1,4 +1,4 @@
-### 👨‍🏫 Santander Customer Satisfaction
+### 👨‍🏫 kaggle Bank Churn
 kaggle에서 제공하는 Binary Classification with a Bank Churn Dataset을 EDA와 model 학습을 통해 고객 이탈 확률을 예측하는 프로젝트
 
 ---
